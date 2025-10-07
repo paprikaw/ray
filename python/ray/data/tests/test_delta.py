@@ -33,6 +33,7 @@ try:
     TEST_FIXTURES_AVAILABLE = True
 except ImportError:
     TEST_FIXTURES_AVAILABLE = False
+
     # Define simple local fixtures as fallbacks
     @pytest.fixture
     def local_path():
