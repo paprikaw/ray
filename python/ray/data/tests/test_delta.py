@@ -27,16 +27,17 @@ def test_delta_read_basic(tmp_path, batch_size, write_mode):
     path = os.path.join(tmp_path, "tmp_test_delta")
 
     # Create a sample Delta Lake table
-    # Use pandas DataFrame directly as deltalake handles the conversion
+    # Convert pandas DataFrame to PyArrow table for deltalake
     df = pd.DataFrame(
         {"x": [42] * batch_size, "y": ["a"] * batch_size, "z": [3.14] * batch_size}
     )
+    table = pa.Table.from_pandas(df)
 
     if write_mode == "append":
-        write_deltalake(path, df, mode=write_mode)
-        write_deltalake(path, df, mode=write_mode)
+        write_deltalake(path, table, mode=write_mode)
+        write_deltalake(path, table, mode=write_mode)
     elif write_mode == "overwrite":
-        write_deltalake(path, df, mode=write_mode)
+        write_deltalake(path, table, mode=write_mode)
 
     # Read the Delta Lake table
     ds = ray.data.read_delta(path)

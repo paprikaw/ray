@@ -808,7 +808,8 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
 
         # Read schema from first file
         first_file = os.path.join(self.path, add_actions[0].path)
-        parquet_file = pq.ParquetFile(first_file, filesystem=self.filesystem)
+        file_obj = self.filesystem.open_input_file(first_file)
+        parquet_file = pq.ParquetFile(file_obj)
         schema = parquet_file.schema_arrow
 
         # Add partition columns
