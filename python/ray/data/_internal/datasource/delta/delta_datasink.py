@@ -58,7 +58,9 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
         _check_import(self, module="deltalake", package="deltalake")
 
         self.mode = self._validate_mode(mode)
-        self.partition_cols = self._validate_partition_columns(partition_cols or [])
+        self.partition_cols = self._validate_partition_column_names(
+            partition_cols or []
+        )
         self.schema = schema
         self.write_kwargs = write_kwargs
         self._skip_write = False
@@ -85,7 +87,7 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
             raise ValueError(f"Invalid mode '{mode}'. Supported: {valid_modes}")
         return WriteMode(mode)
 
-    def _validate_partition_columns(self, partition_cols: List[str]) -> List[str]:
+    def _validate_partition_column_names(self, partition_cols: List[str]) -> List[str]:
         """Validate partition column names."""
         if len(partition_cols) > 10:
             raise ValueError(
@@ -104,7 +106,6 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
         """Check ERROR and IGNORE modes before writing files."""
         _check_import(self, module="deltalake", package="deltalake")
 
-        # Store table state at start to detect race conditions
         self._existing_table_at_start = try_get_deltatable(
             self.path, self.storage_options
         )
@@ -142,9 +143,8 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
                 continue
 
             table = block_accessor.to_arrow()
-            # Validate schema before writing
             self._validate_table_schema(table)
-            self._validate_partition_columns(table)
+            self._validate_partition_columns_in_table(table)
 
             # Write this block's data
             actions = self._write_table_data(table, ctx.task_idx, block_idx)
@@ -184,26 +184,17 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
         self, expected_type: pa.DataType, actual_type: pa.DataType
     ) -> bool:
         """Check if two PyArrow types are compatible for writing."""
-        # Exact match
         if expected_type == actual_type:
             return True
 
-        # Allow some type promotions (int32 -> int64, float32 -> float64)
         if pa.types.is_integer(expected_type) and pa.types.is_integer(actual_type):
-            # Allow smaller ints to be promoted to larger ints
-            expected_width = (
-                expected_type.bit_width if hasattr(expected_type, "bit_width") else 64
-            )
-            actual_width = (
-                actual_type.bit_width if hasattr(actual_type, "bit_width") else 64
-            )
+            expected_width = getattr(expected_type, "bit_width", 64)
+            actual_width = getattr(actual_type, "bit_width", 64)
             return actual_width <= expected_width
 
         if pa.types.is_floating(expected_type) and pa.types.is_floating(actual_type):
-            # Allow float32 -> float64
             return True
 
-        # String types are compatible
         if (
             pa.types.is_string(expected_type) or pa.types.is_large_string(expected_type)
         ) and (
@@ -213,7 +204,7 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
 
         return False
 
-    def _validate_partition_columns(self, table: pa.Table) -> None:
+    def _validate_partition_columns_in_table(self, table: pa.Table) -> None:
         """Validate that all partition columns exist in the table schema."""
         if not self.partition_cols:
             return
@@ -225,7 +216,6 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
                 f"Partition columns {missing_cols} not found in table schema. "
                 f"Available columns: {table.column_names}."
             )
-        # Validate schema matches if provided
         if self.schema:
             for col in self.partition_cols:
                 if col not in self.schema.names:
@@ -483,16 +473,13 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
         # Validate all file actions before committing
         self._validate_file_actions(all_file_actions)
 
-        # Check for race condition: table created between on_write_start and now
         existing_table = try_get_deltatable(self.path, self.storage_options)
 
-        # Detect race condition
         if (
             self._existing_table_at_start is None
             and existing_table is not None
             and self.mode == WriteMode.ERROR
         ):
-            # Clean up written files
             self._cleanup_written_files()
             raise ValueError(
                 f"Race condition detected: Delta table was created at {self.path} "
@@ -526,22 +513,18 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
             action
             for task_file_actions in write_result.write_returns
             for action in task_file_actions
-            if action is not None  # Filter None actions
+            if action is not None
         ]
-        # Check for duplicate paths
         paths = [action.path for action in actions]
         if len(paths) != len(set(paths)):
-            duplicates = [p for p in paths if paths.count(p) > 1]
+            duplicates = {p for p in paths if paths.count(p) > 1}
             raise ValueError(
-                f"Duplicate file paths detected in AddActions: {set(duplicates)}"
+                f"Duplicate file paths detected in AddActions: {duplicates}"
             )
         return actions
 
     def _validate_file_actions(self, file_actions: List["AddAction"]) -> None:
         """Validate file actions before committing."""
-        if not file_actions:
-            return
-
         for action in file_actions:
             full_path = os.path.join(self.path, action.path)
             file_info = self.filesystem.get_file_info(full_path)
@@ -617,10 +600,8 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
                 f"Table created at {self.path} during write. Skipping commit due to mode='ignore'."
             )
             return
-
-        # Validate schema compatibility before committing
-        existing_schema = existing_table.schema().to_pyarrow()
         if file_actions:
+            existing_schema = existing_table.schema().to_pyarrow()
             inferred_schema = self._infer_schema(file_actions)
             if not self._schemas_compatible(existing_schema, inferred_schema):
                 existing_cols = {f.name: f.type for f in existing_schema}
@@ -662,16 +643,13 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
 
     def _schemas_compatible(self, schema1: pa.Schema, schema2: pa.Schema) -> bool:
         """Check if two schemas are compatible for append operations."""
-        # For append, new schema must be subset or compatible
-        # For now, check if all columns in schema2 exist in schema1 with compatible types
         if len(schema2) > len(schema1):
-            return False  # Cannot add columns in append mode
+            return False
 
         schema1_dict = {f.name: f.type for f in schema1}
         for field in schema2:
             if field.name not in schema1_dict:
                 return False
-            # Type compatibility check
             if not self._types_compatible(schema1_dict[field.name], field.type):
                 return False
         return True
@@ -715,32 +693,21 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
             int(value)
             return pa.int64()
         except ValueError:
-            pass
-        try:
-            float(value)
-            return pa.float64()
-        except ValueError:
-            pass
-        return pa.string()
+            try:
+                float(value)
+                return pa.float64()
+            except ValueError:
+                return pa.string()
 
     def _convert_schema_to_delta(self, pa_schema: pa.Schema) -> "Any":
-        """Convert PyArrow schema to Delta schema with fallback for compatibility."""
+        """Convert PyArrow schema to Delta schema."""
         from deltalake import Schema as DeltaSchema
 
         try:
             return DeltaSchema.from_arrow(pa_schema)
-        except (ValueError, TypeError) as e:
-            logger.warning(
-                f"Failed to convert PyArrow schema using Arrow C Data Interface: {e}. Falling back to JSON-based conversion."
-            )
-
-        try:
+        except (ValueError, TypeError):
             schema_json = self._pyarrow_schema_to_delta_json(pa_schema)
             return DeltaSchema.from_json(schema_json)
-        except Exception as e:
-            raise ValueError(
-                f"Failed to convert PyArrow schema to Delta schema. Both Arrow C Data Interface and JSON conversion failed. Error: {e}"
-            ) from e
 
     def _pyarrow_schema_to_delta_json(self, pa_schema: pa.Schema) -> str:
         """Convert PyArrow schema to Delta schema JSON format."""
