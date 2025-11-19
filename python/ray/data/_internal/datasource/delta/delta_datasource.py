@@ -5,9 +5,10 @@ Delta Lake datasource implementation for reading Delta tables.
 import logging
 from typing import Any, Dict, List, Optional, Union
 
-from ray.data._internal.util import _check_import
+from ray.data._internal.util import _check_import, _is_local_scheme
 from ray.data.datasource import Datasource, ReadTask
-from ray.data.datasource.partitioning import Partitioning
+from ray.data.datasource.file_meta_provider import FileMetadataProvider
+from ray.data.datasource.partitioning import Partitioning, PathPartitionFilter
 from ray.util.annotations import PublicAPI
 
 logger = logging.getLogger(__name__)
@@ -27,6 +28,10 @@ class DeltaDatasource(Datasource):
         filesystem: Optional[Any] = None,
         columns: Optional[List[str]] = None,
         partitioning: Partitioning = Partitioning("hive"),
+        meta_provider: Optional[FileMetadataProvider] = None,
+        partition_filter: Optional[PathPartitionFilter] = None,
+        shuffle: Optional[Any] = None,
+        include_paths: bool = False,
         **arrow_parquet_args,
     ):
         """Initialize Delta Lake datasource.
@@ -39,6 +44,10 @@ class DeltaDatasource(Datasource):
             filesystem: PyArrow filesystem for reading files.
             columns: List of column names to read.
             partitioning: Partitioning scheme for reading files.
+            meta_provider: File metadata provider for reading files.
+            partition_filter: Path partition filter for filtering partitions.
+            shuffle: Shuffle mode for reading files ("files" or None).
+            include_paths: Whether to include file paths in the output.
             **arrow_parquet_args: Additional arguments passed to PyArrow parquet reader.
         """
         _check_import(self, module="deltalake", package="deltalake")
@@ -55,6 +64,10 @@ class DeltaDatasource(Datasource):
         self.filesystem = filesystem
         self.columns = columns
         self.partitioning = partitioning
+        self.meta_provider = meta_provider
+        self.partition_filter = partition_filter
+        self.shuffle = shuffle
+        self.include_paths = include_paths
         self.arrow_parquet_args = arrow_parquet_args
         self._delta_table = None
 
@@ -93,6 +106,10 @@ class DeltaDatasource(Datasource):
             columns=self.columns,
             filesystem=self.filesystem,
             partitioning=self.partitioning,
+            meta_provider=self.meta_provider,
+            partition_filter=self.partition_filter,
+            shuffle=self.shuffle,
+            include_paths=self.include_paths,
             **self.arrow_parquet_args,
         )
 
@@ -101,6 +118,11 @@ class DeltaDatasource(Datasource):
     def estimate_inmemory_data_size(self) -> Optional[int]:
         """Estimate in-memory data size for the Delta table."""
         return None
+
+    @property
+    def supports_distributed_reads(self) -> bool:
+        """Whether this datasource supports distributed reads."""
+        return not _is_local_scheme(self.path)
 
     def get_name(self) -> str:
         """Return human-readable name for this datasource."""

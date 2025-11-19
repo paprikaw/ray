@@ -75,10 +75,11 @@ class DeltaCDFDatasource(Datasource):
         read_tasks = []
         for i in range(num_tasks):
             chunk_start = self.starting_version + i * versions_per_task
-            chunk_end = min(
-                self.starting_version + (i + 1) * versions_per_task - 1,
-                actual_ending_version,
-            )
+            # Last task covers all remaining versions up to actual_ending_version
+            if i == num_tasks - 1:
+                chunk_end = actual_ending_version
+            else:
+                chunk_end = self.starting_version + (i + 1) * versions_per_task - 1
 
             if chunk_start > chunk_end:
                 continue

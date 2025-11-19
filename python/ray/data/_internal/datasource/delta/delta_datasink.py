@@ -234,19 +234,22 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
         """Write table data as partitioned or non-partitioned Parquet files."""
         if self.partition_cols:
             partitioned_tables = self._partition_table(table, self.partition_cols)
-            return [
+            actions = [
                 self._write_partition(
                     partition_table, partition_values, task_idx, block_idx
                 )
                 for partition_values, partition_table in partitioned_tables.items()
             ]
-        return [self._write_partition(table, (), task_idx, block_idx)]
+            return [a for a in actions if a is not None]
+        action = self._write_partition(table, (), task_idx, block_idx)
+        return [action] if action is not None else []
 
     def _partition_table(
         self, table: pa.Table, partition_cols: List[str]
     ) -> Dict[tuple, pa.Table]:
         """Partition table by columns efficiently using vectorized operations."""
         from collections import defaultdict
+
         import pyarrow.compute as pc
 
         partitions = {}
@@ -294,7 +297,7 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
         partition_values: tuple,
         task_idx: int,
         block_idx: int = 0,
-    ) -> "AddAction":
+    ) -> Optional["AddAction"]:
         """Write a single partition to Parquet file and create AddAction metadata."""
         from deltalake.transaction import AddAction
 
@@ -456,6 +459,9 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
         self._validate_file_actions(all_file_actions)
 
         if existing_table:
+            if self.mode == WriteMode.IGNORE:
+                self._cleanup_written_files()
+                return
             self._commit_to_existing_table(existing_table, all_file_actions)
         else:
             self._create_table_with_files(all_file_actions)
@@ -547,8 +553,6 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
                 f"the transaction log. Use mode='append' or 'overwrite' if concurrent writes are expected."
             )
 
-        if self.mode == WriteMode.IGNORE:
-            return
         if file_actions:
             existing_schema = existing_table.schema().to_pyarrow()
             inferred_schema = self._infer_schema(file_actions)

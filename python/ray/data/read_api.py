@@ -4408,6 +4408,10 @@ def read_delta(
         filesystem=filesystem,
         columns=columns,
         partitioning=partitioning,
+        meta_provider=meta_provider,
+        partition_filter=partition_filter,
+        shuffle=shuffle,
+        include_paths=include_paths,
         **arrow_parquet_args,
     )
 
