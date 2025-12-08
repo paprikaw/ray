@@ -151,7 +151,9 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
         )
 
         if self._existing_table_at_start:
-            self._validate_partition_columns_match_existing(self._existing_table_at_start)
+            self._validate_partition_columns_match_existing(
+                self._existing_table_at_start
+            )
 
         if self.mode == WriteMode.ERROR and self._existing_table_at_start:
             raise ValueError(
@@ -246,8 +248,13 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
         if expected_type == actual_type:
             return True
 
-        # Integer types: actual must fit within expected width
+        # Integer types: actual must fit within expected width and signedness must match
         if pa.types.is_integer(expected_type) and pa.types.is_integer(actual_type):
+            # Check signed vs unsigned - they are not compatible
+            expected_signed = pa.types.is_signed_integer(expected_type)
+            actual_signed = pa.types.is_signed_integer(actual_type)
+            if expected_signed != actual_signed:
+                return False
             expected_width = getattr(expected_type, "bit_width", 64)
             actual_width = getattr(actual_type, "bit_width", 64)
             # Allow same or smaller width, but not larger
@@ -457,13 +464,19 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
     def _validate_file_path(self, relative_path: str) -> None:
         """Validate file path is safe."""
         if not isinstance(relative_path, str):
-            raise ValueError(f"File path must be a string, got {type(relative_path).__name__}")
+            raise ValueError(
+                f"File path must be a string, got {type(relative_path).__name__}"
+            )
         if ".." in relative_path:
             raise ValueError(f"Invalid file path: {relative_path} (contains '..')")
         if relative_path.startswith("/"):
-            raise ValueError(f"Invalid file path: {relative_path} (absolute path not allowed)")
+            raise ValueError(
+                f"Invalid file path: {relative_path} (absolute path not allowed)"
+            )
         if len(relative_path) > 500:
-            raise ValueError(f"File path too long ({len(relative_path)} chars): {relative_path}")
+            raise ValueError(
+                f"File path too long ({len(relative_path)} chars): {relative_path}"
+            )
         # Check for other dangerous patterns
         if "\x00" in relative_path:
             raise ValueError(f"Invalid file path: {relative_path} (contains null byte)")
@@ -545,7 +558,9 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
                 except Exception:
                     pass
         if last_err is not None:
-            raise RuntimeError(f"Failed to write Parquet file {file_path}: {last_err}") from last_err
+            raise RuntimeError(
+                f"Failed to write Parquet file {file_path}: {last_err}"
+            ) from last_err
 
     def _prepare_table_for_write(self, table: pa.Table) -> pa.Table:
         """Prepare table for writing by removing partition columns."""
@@ -780,7 +795,9 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
             # No file actions and no schema - skip validation
             inferred_schema = None
 
-        if inferred_schema and not self._schemas_compatible(existing_schema, inferred_schema):
+        if inferred_schema and not self._schemas_compatible(
+            existing_schema, inferred_schema
+        ):
             existing_cols = {f.name: f.type for f in existing_schema}
             inferred_cols = {f.name: f.type for f in inferred_schema}
             # For append operations, inferred can have fewer columns (missing is OK)
@@ -789,7 +806,8 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
             mismatches = [
                 c
                 for c in existing_cols
-                if c in inferred_cols and not self._types_compatible(existing_cols[c], inferred_cols[c])
+                if c in inferred_cols
+                and not self._types_compatible(existing_cols[c], inferred_cols[c])
             ]
             msg = "Schema mismatch"
             if extra:
@@ -827,7 +845,9 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
                 return False
         return True
 
-    def _validate_partition_columns_match_existing(self, existing_table: "DeltaTable") -> None:
+    def _validate_partition_columns_match_existing(
+        self, existing_table: "DeltaTable"
+    ) -> None:
         """Validate partition columns align with the existing table metadata."""
         existing_partitions = existing_table.metadata().partition_columns
         if self.partition_cols:
@@ -979,7 +999,9 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
         )
         self._cleanup_written_files()
 
-    def _cleanup_written_files(self, file_actions: Optional[List["AddAction"]] = None) -> None:
+    def _cleanup_written_files(
+        self, file_actions: Optional[List["AddAction"]] = None
+    ) -> None:
         """Clean up all written files that weren't committed.
 
         Args:

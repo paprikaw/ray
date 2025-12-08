@@ -117,14 +117,18 @@ def test_write_delta_invalid_mode(ray_start_regular_shared, temp_delta_path):
         ds.write_delta(temp_delta_path, mode="invalid_mode")
 
 
-def test_write_delta_partition_mismatch_existing(ray_start_regular_shared, temp_delta_path):
+def test_write_delta_partition_mismatch_existing(
+    ray_start_regular_shared, temp_delta_path
+):
     """Partition columns must match existing table metadata."""
     data = [{"year": 2024, "value": 1}]
     ray.data.from_items(data).write_delta(temp_delta_path, partition_cols=["year"])
 
     # Mismatched partition spec should fail.
     with pytest.raises(ValueError, match="Partition columns mismatch"):
-        ray.data.from_items(data).write_delta(temp_delta_path, partition_cols=["year", "month"])
+        ray.data.from_items(data).write_delta(
+            temp_delta_path, partition_cols=["year", "month"]
+        )
 
 
 def test_read_delta_column_projection(ray_start_regular_shared, temp_delta_path):
