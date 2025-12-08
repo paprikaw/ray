@@ -667,7 +667,19 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
             if self.mode == WriteMode.IGNORE:
                 self._cleanup_written_files(all_file_actions)
                 return
-            self._commit_to_existing_table(existing_table, all_file_actions)
+            # For OVERWRITE mode, if table was deleted, create new table instead
+            # (OVERWRITE semantics allow replacing a deleted table)
+            if existing_table is None and self.mode == WriteMode.OVERWRITE:
+                self._create_table_with_files(all_file_actions)
+            elif existing_table is not None:
+                # Table still exists, commit to it
+                self._commit_to_existing_table(existing_table, all_file_actions)
+            else:
+                # Table was deleted and mode is not OVERWRITE (shouldn't happen due to checks above)
+                raise ValueError(
+                    f"Delta table was deleted at {self.path} after write started. "
+                    f"Cannot commit to non-existent table."
+                )
         else:
             self._create_table_with_files(all_file_actions)
         self._written_files.clear()
