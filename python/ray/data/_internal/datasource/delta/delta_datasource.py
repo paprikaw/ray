@@ -70,11 +70,13 @@ class DeltaDatasource(Datasource):
         self.include_paths = include_paths
         self.arrow_parquet_args = arrow_parquet_args
         self._delta_table = None
+        self._delta_table_version: Optional[Union[int, str]] = None
+        self._delta_table_storage_options: Dict[str, str] = dict(self.storage_options)
 
     @property
     def delta_table(self):
         """Lazy-load Delta table object."""
-        if self._delta_table is None:
+        if self._delta_table is None or self._needs_new_table():
             from deltalake import DeltaTable
 
             dt_kwargs = {}
@@ -82,7 +84,11 @@ class DeltaDatasource(Datasource):
                 dt_kwargs["storage_options"] = self.storage_options
             if self.version is not None:
                 dt_kwargs["version"] = self.version
+            if self.filesystem is not None:
+                dt_kwargs["filesystem"] = self.filesystem
             self._delta_table = DeltaTable(self.path, **dt_kwargs)
+            self._delta_table_version = self.version
+            self._delta_table_storage_options = dict(self.storage_options)
         return self._delta_table
 
     def get_file_paths(self) -> List[str]:
@@ -151,3 +157,13 @@ class DeltaDatasource(Datasource):
         """String representation of datasource."""
         version_info = f", version={self.version}" if self.version else ""
         return f"DeltaDatasource(path={self.path}{version_info})"
+
+    def _needs_new_table(self) -> bool:
+        """Return True if cached DeltaTable is stale for current settings."""
+        if self._delta_table is None:
+            return True
+        if self._delta_table_version != self.version:
+            return True
+        if self._delta_table_storage_options != dict(self.storage_options):
+            return True
+        return False

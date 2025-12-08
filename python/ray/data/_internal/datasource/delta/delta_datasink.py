@@ -13,6 +13,7 @@ PyArrow: https://arrow.apache.org/docs/python/
 import json
 import logging
 import os
+import posixpath
 import time
 import urllib.parse
 import uuid
@@ -148,6 +149,9 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
         self._existing_table_at_start = try_get_deltatable(
             self.path, self.storage_options
         )
+
+        if self._existing_table_at_start:
+            self._validate_partition_columns_match_existing(self._existing_table_at_start)
 
         if self.mode == WriteMode.ERROR and self._existing_table_at_start:
             raise ValueError(
@@ -422,10 +426,7 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
         self._validate_file_path(relative_path)
         # Use filesystem-safe path joining to prevent path traversal
         # relative_path is already validated to not contain ".."
-        if self.path.endswith("/"):
-            full_path = self.path + relative_path
-        else:
-            full_path = self.path + "/" + relative_path
+        full_path = _join_delta_path(self.path, relative_path)
 
         self._written_files.add(full_path)
         table_to_write = self._prepare_table_for_write(table)
@@ -513,39 +514,35 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
             )
 
         self._ensure_parent_directory(file_path)
-        try:
-            pq.write_table(
-                table,
-                file_path,
-                filesystem=self.filesystem,
-                compression=compression,
-                write_statistics=True,
-            )
+        write_statistics = self.write_kwargs.get("write_statistics", True)
+        attempts = 3
+        last_err: Optional[Exception] = None
 
+        for _ in range(attempts):
             try:
-                file_info = self.filesystem.get_file_info(file_path)
+                pq.write_table(
+                    table,
+                    file_path,
+                    filesystem=self.filesystem,
+                    compression=compression,
+                    write_statistics=write_statistics,
+                )
+                file_info = _get_file_info_with_retry(self.filesystem, file_path)
                 if file_info.size == 0:
-                    # Clean up empty file
                     try:
                         self.filesystem.delete_file(file_path)
                     except Exception:
                         pass
                     raise RuntimeError(f"Written file is empty: {file_path}")
                 return file_info.size
-            except Exception as e:
-                # Clean up file if we can't verify it
+            except Exception as err:  # noqa: BLE001
+                last_err = err
                 try:
                     self.filesystem.delete_file(file_path)
                 except Exception:
                     pass
-                raise RuntimeError(f"Failed to verify written file {file_path}: {e}") from e
-        except Exception:
-            # Clean up partial file on any write error
-            try:
-                self.filesystem.delete_file(file_path)
-            except Exception:
-                pass
-            raise
+        if last_err is not None:
+            raise RuntimeError(f"Failed to write Parquet file {file_path}: {last_err}") from last_err
 
     def _prepare_table_for_write(self, table: pa.Table) -> pa.Table:
         """Prepare table for writing by removing partition columns."""
@@ -553,9 +550,13 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
 
     def _ensure_parent_directory(self, file_path: str) -> None:
         """Create parent directory for file if it doesn't exist."""
-        parent_dir = os.path.dirname(file_path)
+        parent_dir = _safe_dirname(file_path)
         if parent_dir:
-            self.filesystem.create_dir(parent_dir, recursive=True)
+            try:
+                self.filesystem.create_dir(parent_dir, recursive=True)
+            except Exception:
+                # Some cloud filesystems do not require directory creation; ignore.
+                pass
 
     def _compute_statistics(self, table: pa.Table) -> str:
         """Compute file-level statistics for Delta Lake transaction log.
@@ -687,8 +688,8 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
         """Validate file actions before committing."""
         for action in file_actions:
             self._validate_file_path(action.path)
-            full_path = os.path.join(self.path, action.path)
-            file_info = self.filesystem.get_file_info(full_path)
+            full_path = _join_delta_path(self.path, action.path)
+            file_info = _get_file_info_with_retry(self.filesystem, full_path)
             if file_info.type == pa_fs.FileType.NotFound:
                 raise ValueError(f"File does not exist: {full_path}")
             if file_info.size == 0:
@@ -794,6 +795,7 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
                 msg += f": type mismatches {mismatches}"
             raise ValueError(msg)
 
+        self._validate_partition_columns_match_existing(existing_table)
         transaction_mode = "overwrite" if self.mode == WriteMode.OVERWRITE else "append"
         existing_table.create_write_transaction(
             actions=file_actions,
@@ -821,6 +823,23 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
             if not self._types_compatible(schema1_dict[field.name], field.type):
                 return False
         return True
+
+    def _validate_partition_columns_match_existing(self, existing_table: "DeltaTable") -> None:
+        """Validate partition columns align with the existing table metadata."""
+        existing_partitions = existing_table.metadata().partition_columns
+        if self.partition_cols:
+            if existing_partitions and existing_partitions != self.partition_cols:
+                raise ValueError(
+                    f"Partition columns mismatch. Existing: {existing_partitions}, requested: {self.partition_cols}"
+                )
+            if not existing_partitions and self.partition_cols:
+                raise ValueError(
+                    f"Partition columns provided {self.partition_cols} but table is not partitioned."
+                )
+        elif existing_partitions:
+            raise ValueError(
+                f"Table is partitioned by {existing_partitions} but no partition columns were provided."
+            )
 
     def _infer_schema(self, add_actions: List["AddAction"]) -> pa.Schema:
         """Infer schema from first Parquet file and partition columns.
@@ -960,7 +979,44 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
     def _cleanup_written_files(self) -> None:
         """Clean up all written files that weren't committed."""
         for file_path in self._written_files:
-            file_info = self.filesystem.get_file_info(file_path)
+            file_info = _get_file_info_with_retry(self.filesystem, file_path)
             if file_info.type != pa_fs.FileType.NotFound:
                 self.filesystem.delete_file(file_path)
         self._written_files.clear()
+
+
+def _join_delta_path(base_path: str, relative_path: str) -> str:
+    """Join base table path and relative file path safely for local and URI paths."""
+    base = base_path.rstrip("/")
+    rel = relative_path.lstrip("/")
+    if "://" in base:
+        # Preserve scheme, normalize path portion with posix semantics.
+        scheme, rest = base.split("://", 1)
+        joined = posixpath.join(rest, rel)
+        return f"{scheme}://{joined}"
+    return posixpath.join(base, rel)
+
+
+def _safe_dirname(path: str) -> str:
+    """Return directory portion using posix semantics to support URI paths."""
+    if "://" in path:
+        scheme, rest = path.split("://", 1)
+        directory = posixpath.dirname(rest)
+        if directory:
+            return f"{scheme}://{directory}"
+        return ""
+    return os.path.dirname(path)
+
+
+def _get_file_info_with_retry(
+    filesystem: pa_fs.FileSystem, path: str, retries: int = 3
+) -> pa_fs.FileInfo:
+    """Get file info with small retries for transient FS errors."""
+    last_err: Optional[Exception] = None
+    for attempt in range(retries):
+        try:
+            return filesystem.get_file_info(path)
+        except Exception as exc:  # noqa: BLE001
+            last_err = exc
+    if last_err is not None:
+        raise last_err
