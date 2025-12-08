@@ -368,7 +368,10 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
             for val in unique_vals:
                 val_py = val.as_py()
                 self._validate_partition_value(val_py)
-                filtered = table.filter(pc.equal(table[col], val))
+                if val_py is None:
+                    filtered = table.filter(pc.is_null(table[col]))
+                else:
+                    filtered = table.filter(pc.equal(table[col], val))
                 if len(filtered) > 0:
                     partitions[(val_py,)] = filtered
         else:
@@ -612,7 +615,7 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
             and existing_table is not None
             and self.mode == WriteMode.ERROR
         ):
-            self._cleanup_written_files()
+            self._cleanup_written_files(all_file_actions)
             raise ValueError(
                 f"Race condition detected: Delta table was created at {self.path} "
                 f"after write started. Files have been written but not committed to "
@@ -625,7 +628,7 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
             and existing_table is None
             and self.mode == WriteMode.APPEND
         ):
-            self._cleanup_written_files()
+            self._cleanup_written_files(all_file_actions)
             raise ValueError(
                 f"Delta table was deleted at {self.path} after write started. "
                 f"Files have been written but not committed. Use mode='overwrite' to create a new table."
@@ -634,7 +637,7 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
         if not all_file_actions:
             if self.schema and not existing_table:
                 if self.mode == WriteMode.ERROR:
-                    self._cleanup_written_files()
+                    self._cleanup_written_files(all_file_actions)
                     raise ValueError(
                         f"Cannot create empty table in ERROR mode. Table does not exist at {self.path}"
                     )
@@ -645,7 +648,7 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
 
         if existing_table:
             if self.mode == WriteMode.IGNORE:
-                self._cleanup_written_files()
+                self._cleanup_written_files(all_file_actions)
                 return
             self._commit_to_existing_table(existing_table, all_file_actions)
         else:
@@ -856,7 +859,7 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
         if not add_actions:
             raise ValueError("Cannot infer schema from empty file list")
 
-        first_file = os.path.join(self.path, add_actions[0].path)
+        first_file = _join_delta_path(self.path, add_actions[0].path)
         with self.filesystem.open_input_file(first_file) as file_obj:
             parquet_file = pq.ParquetFile(file_obj)
             schema = parquet_file.schema_arrow
@@ -976,12 +979,29 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
         )
         self._cleanup_written_files()
 
-    def _cleanup_written_files(self) -> None:
-        """Clean up all written files that weren't committed."""
-        for file_path in self._written_files:
-            file_info = _get_file_info_with_retry(self.filesystem, file_path)
-            if file_info.type != pa_fs.FileType.NotFound:
-                self.filesystem.delete_file(file_path)
+    def _cleanup_written_files(self, file_actions: Optional[List["AddAction"]] = None) -> None:
+        """Clean up all written files that weren't committed.
+
+        Args:
+            file_actions: Optional list of AddAction objects with file paths.
+                If provided, uses these paths instead of _written_files set.
+        """
+        files_to_cleanup = set()
+        if file_actions:
+            for action in file_actions:
+                if action and action.path:
+                    full_path = _join_delta_path(self.path, action.path)
+                    files_to_cleanup.add(full_path)
+        else:
+            files_to_cleanup = self._written_files.copy()
+
+        for file_path in files_to_cleanup:
+            try:
+                file_info = _get_file_info_with_retry(self.filesystem, file_path)
+                if file_info.type != pa_fs.FileType.NotFound:
+                    self.filesystem.delete_file(file_path)
+            except Exception as e:
+                logger.warning(f"Failed to cleanup file {file_path}: {e}")
         self._written_files.clear()
 
 
