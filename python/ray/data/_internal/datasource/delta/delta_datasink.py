@@ -377,25 +377,48 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
                 self._validate_partition_value(val_py)
                 if val_py is None:
                     filtered = table.filter(pc.is_null(table[col]))
+                elif pa.types.is_floating(table[col].type) and (
+                    isinstance(val_py, float) and val_py != val_py
+                ):  # NaN check: val_py != val_py is True only for NaN
+                    filtered = table.filter(pc.is_nan(table[col]))
                 else:
                     filtered = table.filter(pc.equal(table[col], val))
                 if len(filtered) > 0:
                     partitions[(val_py,)] = filtered
         else:
+            import math
+
+            # Sentinel object for NaN values to ensure consistent tuple keys
+            # (NaN != NaN in Python, so we use a sentinel object)
+            _NAN_SENTINEL = object()
+
             val_lists = [table[col].to_pylist() for col in partition_cols]
             indices = defaultdict(list)
             for idx, tup in enumerate(zip(*val_lists)):
+                # Normalize NaN values to sentinel to ensure consistent tuple keys
+                # (NaN != NaN in Python, so we normalize to a sentinel object)
+                normalized_tup = tuple(
+                    _NAN_SENTINEL
+                    if isinstance(v, float) and math.isnan(v)
+                    else v
+                    for v in tup
+                )
                 for v in tup:
                     self._validate_partition_value(v)
-                indices[tup].append(idx)
+                indices[normalized_tup].append(idx)
             if len(indices) > _MAX_PARTITIONS:
                 raise ValueError(
                     f"Too many partition combinations ({len(indices)}). Max: {_MAX_PARTITIONS}"
                 )
             for tup, idxs in indices.items():
+                # Convert sentinel back to NaN for partition key
+                # (Delta Lake uses NaN as partition value)
+                partition_key = tuple(
+                    float("nan") if v is _NAN_SENTINEL else v for v in tup
+                )
                 partitioned = table.take(idxs)
                 if len(partitioned) > 0:
-                    partitions[tup] = partitioned
+                    partitions[partition_key] = partitioned
         return partitions
 
     def _validate_partition_value(self, value: Any) -> None:
@@ -651,6 +674,13 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
 
         if not all_file_actions:
             if self.schema and not existing_table:
+                # For IGNORE mode, skip creation if table existed at start
+                # (even if it was deleted during write)
+                if (
+                    self.mode == WriteMode.IGNORE
+                    and self._existing_table_at_start is not None
+                ):
+                    return
                 if self.mode == WriteMode.ERROR:
                     self._cleanup_written_files(all_file_actions)
                     raise ValueError(
