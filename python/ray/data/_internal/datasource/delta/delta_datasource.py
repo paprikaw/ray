@@ -5,6 +5,8 @@ Delta Lake datasource implementation for reading Delta tables.
 import logging
 from typing import Any, Dict, List, Optional, Union
 
+import pyarrow.fs as pa_fs
+
 from ray.data._internal.datasource.delta.utilities import to_pyarrow_schema
 
 from ray.data._internal.util import _check_import, _is_local_scheme
@@ -113,10 +115,32 @@ class DeltaDatasource(Datasource):
 
         from ray.data._internal.datasource.parquet_datasource import ParquetDatasource
 
+        filesystem = self.filesystem
+        # If no filesystem was supplied, try to construct one from storage options
+        # so that Parquet reads use the same credentials as Delta metadata access.
+        if filesystem is None:
+            path_lower = self.path.lower()
+            if path_lower.startswith(("s3://", "s3a://")):
+                access_key = self.storage_options.get("AWS_ACCESS_KEY_ID")
+                secret_key = self.storage_options.get("AWS_SECRET_ACCESS_KEY")
+                session_token = self.storage_options.get("AWS_SESSION_TOKEN")
+                region = self.storage_options.get("AWS_REGION")
+                if access_key or secret_key or session_token or region:
+                    filesystem = pa_fs.S3FileSystem(
+                        access_key=access_key,
+                        secret_key=secret_key,
+                        session_token=session_token,
+                        region=region,
+                    )
+            elif path_lower.startswith(("abfss://", "abfs://")):
+                token = self.storage_options.get("AZURE_STORAGE_TOKEN")
+                if token:
+                    filesystem = pa_fs.AzureFileSystem(token=token)
+
         parquet_datasource = ParquetDatasource(
             file_paths,
             columns=self.columns,
-            filesystem=self.filesystem,
+            filesystem=filesystem,
             partitioning=self.partitioning,
             meta_provider=self.meta_provider,
             partition_filter=self.partition_filter,

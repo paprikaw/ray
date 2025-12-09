@@ -690,11 +690,8 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
                 # (even if it was deleted during write)
                 if self.mode == WriteMode.IGNORE and self._table_existed_at_start:
                     return
-                if self.mode == WriteMode.ERROR:
-                    self._cleanup_written_files(all_file_actions)
-                    raise ValueError(
-                        f"Cannot create empty table in ERROR mode. Table does not exist at {self.path}"
-                    )
+                # ERROR mode should allow creating a new empty table when none exists.
+                # Only fail in ERROR mode when a table already exists (validated earlier).
                 self._create_empty_table()
             return
 
